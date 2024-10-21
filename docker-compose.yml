@@ -1,0 +1,43 @@
+volumes:
+  esdata:
+    driver: local # Uses the local driver for the esdata volume
+
+services: # Defines the services to be run
+  api: # The name of the first service
+    build: . # Builds the Docker image from the Dockerfile in the current directory
+    ports:
+      - "3000:3000" # Maps port 3000 on the host to port 3000 in the container
+    depends_on:
+      - elasticsearch # Ensures the elasticsearch service is started before this service
+      - redis # Ensures the redis service is started before this service
+    environment:
+      - NODE_ENV=development # Sets the environment variable NODE_ENV to 'development'
+      - ELASTICSEARCH_HOST=http://elasticsearch:9200 # Sets the Elasticsearch host URL
+      - REDIS_HOST=redis # Sets the Redis hostname inside the Docker network
+      - REDIS_PORT=6379 # Sets the Redis port to the default port 6379
+
+  elasticsearch: # The name of the second service
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION} # Uses the specified Elasticsearch image
+    environment:
+      # allow CORS requests from https://app.elasticvue.com
+      http.cors.enabled: true
+      http.cors.allow-origin: "https://app.elasticvue.com"
+      # and if your cluster uses authorization:
+      http.cors.allow-headers: X-Requested-With,Content-Type,Content-Length,Authorization,X-Requested-With,Content-Type,Content-Length,Authorization
+      node.name: elasticsearch
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      xpack.security.enabled: ${ELASTIC_SECURITY}
+      discovery.type: single-node
+    ports:
+      - "9200:9200" # Maps port 9200 on the host to port 9200 in the container
+      - "9300:9300" # Maps port 9300 on the host to port 9300 in the container
+    volumes:
+      - esdata:/usr/share/elasticsearch/data # Mounts the esdata volume to store Elasticsearch data
+
+    restart: unless-stopped
+
+  redis: # The name of the third service
+    image: "redis:latest" # Uses the latest Redis image
+    ports:
+      - "6379:6379" # Maps port 6379 on the host to port 6379 in the container
