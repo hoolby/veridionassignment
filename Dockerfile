@@ -28,5 +28,8 @@ FROM nikolaik/python-nodejs:python3.13-nodejs20
 # # Install Python dependencies
 # RUN pip install -r /usr/src/app/scripts/requirements.txt
 # 
+# # Install the SpaCy model
+# RUN python -m spacy download en_core_web_md
+#
 # # Start the app
 # CMD npm run start && pm2 logs

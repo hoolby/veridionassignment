@@ -1,2 +1,7 @@
 scrapy
 spacy
+numpy
+bs4
+fsspec
+sympy
+typing_extensions

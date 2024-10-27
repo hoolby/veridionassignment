@@ -1,9 +1,9 @@
 import express, { Router } from "express";
-import { getScrapingStatus, startScraping } from "./scrapeController";
+import { getScrapingStatus, startScraping } from "./scrape.controller";
 
 const router: Router = express.Router();
 
-router.post("/start/:dataId", startScraping);
+router.post("/start", startScraping);
 
 router.get("/status/:jobId", getScrapingStatus);
 
