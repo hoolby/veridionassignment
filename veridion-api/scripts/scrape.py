@@ -1,66 +1,67 @@
-import scrapy
-from scrapy.spiders import CrawlSpider
+from bs4 import BeautifulSoup
+from datetime import datetime
 from scrapy.linkextractors import LinkExtractor
+from scrapy.spiders import CrawlSpider
+from spacy.matcher import Matcher
+from urllib.parse import urlparse
+import json
+import logging
 import os
 import re
-from urllib.parse import urlparse
-from bs4 import BeautifulSoup
+import requests  # Add requests to make HTTP calls
+import scrapy
+import spacy
+import sys
+
+# Configure logging to ensure each message is flushed immediately
+logger = logging.getLogger("domain_spider")
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter('[%(name)s]: %(message)s'))
+handler.flush = sys.stdout.flush  # Force each log message to flush immediately
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)  # Adjust level as needed
 
 class ContactSpider(CrawlSpider):
-    name = 'contact_spider'
+    name = 'domain_spider'
     custom_settings = {
-        'LOG_LEVEL': 'DEBUG',
         'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
         'DOWNLOAD_TIMEOUT': 15,
         'CONCURRENT_REQUESTS': 10,
         'DOWNLOAD_DELAY': 0.5,
         'RETRY_TIMES': 0,
-        'DEPTH_LIMIT': 2
+        'DEPTH_LIMIT': 2,
+        'LOG_FORMAT': '[%(name)s]: %(message)s',
+        'LOG_ENCODING': 'utf-8'
     }
 
-    def __init__(self, urls=None, job_id=None, *args, **kwargs):
+    def __init__(self, domains=None, job_id=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # Job params
         self.job_id = job_id
+        self.domains = domains.split(',') if domains else []
+        self.total_domains = len(self.domains)
+        
+        # Script variables
         self.output_folder = "output"
+        self.phone_regex = re.compile(r'\(?\b\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b')
         self.working_domains = set()
-        self.current_domain_index = 0
-        self.current_variant_index = 0
-        self.domains = urls.split(',') if urls else []
-
-        # Ensure the output folder exists
-        os.makedirs(self.output_folder, exist_ok=True)
-
-    def generate_url_variants(self, domain):
-        return [f"{scheme}{prefix}{domain}" for scheme in ["https://", "http://"] for prefix in ["", "www."]]
+        start= {
+            'total_domains': self.total_domains
+        }
+        self.logger.info(json.dumps(start))
 
     def start_requests(self):
-        """Override start_requests to yield the first URL."""
-        if self.domains:
-            yield from self.start_next_url()
-
-    def start_next_url(self):
-        if self.current_domain_index < len(self.domains):
-            domain = self.domains[self.current_domain_index]
-            variants = self.generate_url_variants(domain)
-
-            if self.current_variant_index < len(variants):
-                url_to_crawl = variants[self.current_variant_index]
-                self.log(f"Trying URL: {url_to_crawl}")
-                yield scrapy.Request(
-                    url_to_crawl, 
-                    callback=self.parse_item, 
-                    errback=self.errback, 
-                    dont_filter=True,
-                    meta={'domain': domain}
-                )
-            else:
-                self.current_domain_index += 1
-                self.current_variant_index = 0
-                yield from self.start_next_url()
-        else:
-            self.log("All URLs have been processed.")
-            yield None  # Completion message can be useful for logging
-
+        for domain in self.domains:
+            # Define URL variants for each domain
+            url_variants = [
+                f"https://{domain}",
+                f"https://www.{domain}"
+                f"http://{domain}",
+                f"http://www.{domain}",
+            ]
+            # Pass URL variants to parse method
+            yield scrapy.Request(url=url_variants[0], meta={'variants': url_variants, 'index': 0, 'domain': domain}, callback=self.parse_variant, errback=self.errback_variant)
+            
     def parse_item(self, response):
         domain = response.meta['domain']
         
@@ -85,10 +86,8 @@ class ContactSpider(CrawlSpider):
                 deny=['mailto:', 'javascript:', 'tel:', 'fax:', 'sms:', 'callto:', 'skype:', 'whatsapp:', r'#.*']
             )
             links = link_extractor.extract_links(response)
-            self.log(f"Found {len(links)} links on {response.url}")
 
         for link in links:
-            self.log(f"Following link: {link.url}")
             yield scrapy.Request(
                     link.url,
                     callback=self.parse_item, 
@@ -97,13 +96,116 @@ class ContactSpider(CrawlSpider):
                     meta={'domain': domain}
                 )
 
-        self.current_variant_index += 1
-        yield from self.start_next_url()
+    def parse_variant(self, response):
+        # Indicate that we found a working URL by marking a flag
+        response.meta['found_working'] = True
+        
+        # Variables
+        domain = response.meta['domain']
+        valid_url = response.url
+        
+        # Extract content
+        soup = BeautifulSoup(response.body, 'lxml')
+        
+        # Remove scripts and style tags
+        for script in soup(["script", "style"]):
+            script.extract()
+        
+        # Clean multiple spaces
+        text_content = re.sub(r'\s+', ' ', soup.get_text()).strip()
+        
+        #################################################
+        # Process response
+        phone_numbers = list(set(self.phone_regex.findall(text_content)))
+        social_media_links = self.extract_social_media_links(soup)
+        
+        # Extract data and return JSON object
+        data = {
+            'domain': domain,
+            'valid_url': valid_url,
+            'last_crawled_date': datetime.now().isoformat(),
+            'social_media_links':social_media_links if social_media_links else None,
+            'phone_numbers':phone_numbers if phone_numbers else None
+            # 'text_content': text_content  # Replace with actual data extraction logic
+        }
+        self.logger.info(json.dumps(data))
+        
+        # Update Elasticsearch with the result
+        self.update_elasticsearch(domain, data)
 
-    def errback(self, failure):
-        self.log(f"Error for {failure.request.url}: {failure.value}")
-        self.current_variant_index += 1
-        yield from self.start_next_url()
+    def errback_variant(self, failure):
+        # Retrieve metadata
+        variants = failure.request.meta['variants']
+        index = failure.request.meta['index']
+        domain = failure.request.meta['domain']
 
+        # If a working URL has been found, stop trying other variants
+        if failure.request.meta.get('found_working', False):
+            return
+
+        # Check if there are more variants to try
+        if index + 1 < len(variants):
+            # Try the next URL variant
+            next_variant = variants[index + 1]
+            yield scrapy.Request(
+                url=next_variant,
+                meta={
+                    'variants': variants,
+                    'index': index + 1,
+                    'domain': domain,
+                    'found_working': failure.request.meta.get('found_working', False)
+                },
+                callback=self.parse_variant,
+                errback=self.errback_variant
+            )
+        else:
+            # Log error JSON object if no variant is found
+            error_data = {
+                'domain': domain,
+                'valid_url': None,
+                'message': 'No working variant found',
+                'error': str(failure.value),
+                'last_crawled_date': datetime.now().isoformat()
+            }
+            self.logger.error(json.dumps(error_data))
+            
+            # Update Elasticsearch with the error
+            self.update_elasticsearch(domain, error_data)
+
+    def update_elasticsearch(self, domain, result):
+        url = "http://localhost:9200/domains/_update_by_query"
+        auth = ('elastic', 'changeme')
+        headers = {'Content-Type': 'application/json'}
+        data = {
+            "script": {
+                "source": "ctx._source.putAll(params)",
+                "params": result
+            },
+            "query": {
+                "term": {
+                    "domain": domain
+                }
+            }
+        }
+        response = requests.post(url, auth=auth, headers=headers, json=data)
+        if response.status_code == 200:
+            self.logger.info(f"Successfully updated domain {domain} in Elasticsearch.")
+        else:
+            self.logger.error(f"Failed to update domain {domain} in Elasticsearch: {response.text}")
+    
+    def extract_social_media_links(self, soup):
+        links = {}
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if 'facebook.com' in href:
+                links['facebook'] = href
+            elif 'instagram.com' in href:
+                links['instagram'] = href
+            elif 'linkedin.com' in href:
+                links['linkedin'] = href
+            elif 'twitter.com' in href:
+                links['twitter'] = href
+        return links
+    
     def closed(self, reason):
-        self.log("Crawling complete. Results saved in individual text files for each domain.")
+        logger.info(f"PROGRESS COMPLETE: Crawling completed with reason: {reason}.")

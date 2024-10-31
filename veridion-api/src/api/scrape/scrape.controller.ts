@@ -1,142 +1,190 @@
-import ESClient from "@/utils/elasticSearchClient";
+import ESClient, {
+  createOrUpdateJob,
+  getJobById,
+} from "@/utils/elasticSearchClient";
 import Bull from "bull";
 import { spawn } from "child_process";
 import { NextFunction, Request, Response } from "express";
-
-interface JobStatus {
-  status: string;
-  result: any[];
-  progress: number;
-  successfulDomains: number; // New field
-  erroredDomains: number; // New field
-}
-
-const jobs: { [key: string]: JobStatus } = {};
 
 const scrapeQueue = new Bull(
   "scraping",
   `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`
 );
 
-scrapeQueue.process(async (job, done) => {
-  const { urls, jobId } = job.data;
+const CONCURRENCY = 3;
 
-  const scraper = spawn("scrapy", [
-    "runspider",
-    "scripts/scrape.py",
-    "-a",
-    `urls=${urls}`,
-    "-a",
-    `job_id=${jobId}`,
-  ]);
+let activeScrapyProcesses = 0;
 
+scrapeQueue.process(CONCURRENCY, async (job, done) => {
+  activeScrapyProcesses++;
+  console.log(
+    `Starting Scrapy process. Active processes: ${activeScrapyProcesses}`
+  );
+
+  const { domains, jobId, totalDomains } = job.data;
+  const scraper = spawn(
+    "scrapy",
+    [
+      "runspider",
+      "scripts/scrape.py",
+      "-a",
+      `domains=${domains}`,
+      "-a",
+      `job_id=${jobId}`,
+    ],
+    { stdio: ["inherit", "pipe", "pipe"] }
+  );
+
+  // Log handling function
+  const handleDomainSpiderLog = async (data: string, err = false) => {
+    if (data.startsWith("[domain_spider]: ")) {
+      const logData = data.split("[domain_spider]: ")[1];
+      try {
+        const jsonData = JSON.parse(logData);
+        console.log(`JSON LOG: `, JSON.parse(jsonData));
+      } catch {
+        console.log(`CUSTOM LOG: `, logData);
+      }
+      return;
+      if (data.includes("PROGRESS: ")) {
+        const resultData = JSON.parse(data.split("PROGRESS: ")[1]);
+        const jobData = await getJobById(jobId);
+
+        // Update job progress
+        jobData.successfulDomains++;
+        jobData.progress = Math.round(
+          ((jobData.successfulDomains + jobData.erroredDomains) /
+            totalDomains) *
+            100
+        );
+
+        await createOrUpdateJob(jobId, jobData);
+
+        // Update each domain in Elasticsearch
+        try {
+          await ESClient.update({
+            index: "domains",
+            id: resultData.url,
+            body: { doc: resultData, doc_as_upsert: true },
+          });
+        } catch (error: any) {
+          console.error(
+            `Failed to update Elasticsearch for ${resultData.url}: ${error.message}`
+          );
+        }
+      } else if (data.includes("SCRAPE SUCCESS:")) {
+        const jobData = await getJobById(jobId);
+        jobData.status = "completed";
+        await createOrUpdateJob(jobId, jobData);
+        done();
+      } else if (data.includes("Error for")) {
+        const jobData = await getJobById(jobId);
+        jobData.erroredDomains++;
+        jobData.progress = Math.round(
+          ((jobData.successfulDomains + jobData.erroredDomains) /
+            totalDomains) *
+            100
+        );
+        await createOrUpdateJob(jobId, jobData);
+      }
+    } else if (data.startsWith("[scrapy.")) {
+      // console.log(`SCRAPY LOG: ${data}`);
+    } else {
+      // console.log(`UNACCOUNTED${err ? " ERROR " : " "}LOG: ${data}`);
+    }
+  };
+
+  // Handle Scrapy output logs
   scraper.stdout.setEncoding("utf8");
   scraper.stdout.on("data", async (data) => {
-    if (data.startsWith("PARTIAL RESULT:")) {
-      const resultData = JSON.parse(data.split("PARTIAL RESULT:")[1]);
-      jobs[jobId].result.push(resultData);
-      jobs[jobId].successfulDomains += 1; // Update success count
-
-      jobs[jobId].progress = Math.round(
-        ((jobs[jobId].successfulDomains + jobs[jobId].erroredDomains) /
-          urls.split(",").length) *
-          100
-      );
-
-      // Send real-time progress to client (using WebSocket or similar if available)
-      console.log(`Progress for job ${jobId}: ${jobs[jobId].progress}%`);
-
-      // Update Elasticsearch with each partial result
-      try {
-        await ESClient.update({
-          index: "domains",
-          id: resultData.url,
-          body: { doc: resultData, doc_as_upsert: true },
-        });
-      } catch (err: any) {
-        console.error(
-          `Failed to update Elasticsearch for ${resultData.url}: ${err.message}`
-        );
-      }
-    } else if (data.includes("SCRAPE SUCCESS:")) {
-      jobs[jobId].status = "completed";
-      done();
-    }
+    handleDomainSpiderLog(data);
   });
 
-  scraper.stderr.on("data", (data) => {
-    console.error("SCRAPE ERROR: " + data);
-
-    if (data.includes("Error for")) {
-      // Update error count
-      jobs[jobId].erroredDomains += 1;
-      jobs[jobId].progress = Math.round(
-        ((jobs[jobId].successfulDomains + jobs[jobId].erroredDomains) /
-          urls.split(",").length) *
-          100
-      );
-    }
+  scraper.stderr.setEncoding("utf8");
+  scraper.stderr.on("data", async (data) => {
+    handleDomainSpiderLog(data, true);
   });
 
-  scraper.on("close", (code) => {
-    if (code === 0) {
-      jobs[jobId].status = "completed";
-      done();
-    } else {
-      jobs[jobId].status = "failed";
+  // Finalize job on process close
+  scraper.on("close", async (code) => {
+    activeScrapyProcesses--;
+    console.log(
+      `Scrapy process completed. Active processes: ${activeScrapyProcesses}`
+    );
+
+    const jobData = await getJobById(jobId);
+    jobData.status = code === 0 ? "completed" : "failed";
+    await createOrUpdateJob(jobId, jobData);
+
+    if (code !== 0) {
       done(new Error(`Job ${jobId} failed with code ${code}`));
+    } else {
+      done();
     }
   });
 });
 
-/* scrapeQueue.obliterate({ force: true });
-scrapeQueue.getJobCounts().then((counts) => {
-  console.log("string", counts);
-}); */
-
+// Endpoint to start scraping
 export const startScraping = async (
   req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void | any> => {
   try {
-    let allHits: any[] = [];
-    let page = 0;
-    const pageSize = 100;
-
-    while (true) {
-      const {
-        hits: { hits, total },
-      } = await ESClient.search({
-        index: "domains",
-        body: {
-          query: { match_all: {} },
-          from: page * pageSize,
-          size: pageSize,
-        },
-      });
-      allHits = allHits.concat(hits);
-      // @ts-expect-error
-      if (allHits.length >= total?.value) break;
-      page++;
-    }
-
-    const websites: string[] = allHits.map((hit: any) => hit._source.url);
-    if (!websites.length)
-      return res.status(400).json({ error: "URLs are required" });
-
     const timestamp = `${Date.now()}`;
-    scrapeQueue.add({
-      urls: websites.slice(0, 2).join(","),
-      jobId: timestamp,
-    });
-    jobs[timestamp] = {
+    const jobData = {
       status: "pending",
       result: [],
       progress: 0,
-      successfulDomains: 0, // Initialize with 0
-      erroredDomains: 0, // Initialize with 0
+      successfulDomains: 0,
+      erroredDomains: 0,
+      queuedDomains: 0,
     };
+    await createOrUpdateJob(timestamp, jobData);
+
+    const scrollTimeout = "1m";
+    const { _scroll_id, hits } = await ESClient.search({
+      index: "domains",
+      scroll: scrollTimeout,
+      body: { query: { match_all: {} }, size: 100 },
+    });
+    //@ts-expect-error
+    if (!hits.total?.value) {
+      return res.status(400).json({ error: "No URLs found in the index." });
+    }
+
+    let scrollId = _scroll_id;
+    let totalProcessed = 0;
+    //@ts-expect-error
+    const totalDomains = hits.total.value;
+
+    while (hits.hits.length) {
+      const batchDomains = hits.hits.map((hit: any) => hit._source.domain);
+      if (batchDomains.length) {
+        scrapeQueue.add({
+          domains: batchDomains.join(","),
+          jobId: timestamp,
+          totalDomains,
+        });
+      }
+
+      totalProcessed += batchDomains.length;
+
+      // Update queued domains and job progress
+      await createOrUpdateJob(timestamp, {
+        queuedDomains: totalProcessed,
+        totalDomains,
+        progress: Math.round((totalProcessed / totalDomains) * 100),
+      });
+
+      const nextScroll = await ESClient.scroll({
+        scroll_id: scrollId,
+        scroll: scrollTimeout,
+      });
+
+      scrollId = nextScroll._scroll_id;
+      hits.hits = nextScroll.hits.hits;
+    }
 
     res.status(200).json({ jobId: timestamp });
   } catch (error) {
@@ -146,6 +194,7 @@ export const startScraping = async (
   }
 };
 
+// Endpoint to get scraping job status
 export const getScrapingStatus = async (
   req: Request,
   res: Response,
@@ -153,8 +202,7 @@ export const getScrapingStatus = async (
 ) => {
   try {
     const { jobId } = req.params;
-    const status = jobs[jobId] || null;
-    console.log("jobs", status);
+    const status = await getJobById(jobId);
     if (!status) {
       res.status(404).json({ message: "Job not found." });
       return;

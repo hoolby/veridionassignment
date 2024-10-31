@@ -1,28 +1,22 @@
 import { healthCheckRouter } from "@/api/healthCheck/healthCheckRouter";
-import scrapeRoutes from "@/api/scrape/scrape.routes";
 import queryRoutes from "@/api/query/query.routes";
+import scrapeRoutes from "@/api/scrape/scrape.routes";
 import uploadRoutes from "@/api/upload/upload.routes";
 import errorHandler from "@/middleware/errorHandler";
 import rateLimiter from "@/middleware/rateLimiter";
 import requestLogger from "@/middleware/requestLogger";
-import { env } from "@/utils/envConfig";
 import cors from "cors";
 import express, { type Express } from "express";
 import helmet from "helmet";
 import { pino } from "pino";
-import ESClient from "./utils/elasticSearchClient";
-import { createIndexIfNotExists } from "./utils/elasticSearchClient";
+import { createIndexIfNotExists, pingES } from "./utils/elasticSearchClient";
 const logger = pino({ name: "server start" });
 const app: Express = express();
 
-ESClient.ping()
-  .then(() => {
-    logger.info("Elasticsearch cluster is up!");
-  })
-  .catch((err: any) => {
-    logger.error("Elasticsearch cluster is down!", err);
-  });
-createIndexIfNotExists();
+pingES();
+createIndexIfNotExists("domains");
+createIndexIfNotExists("jobs");
+
 // Set the application to trust the reverse proxy
 app.set("trust proxy", true);
 
