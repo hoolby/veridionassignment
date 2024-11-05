@@ -2,7 +2,6 @@ import type { Request } from "express";
 import { rateLimit } from "express-rate-limit";
 
 import { env } from "@/utils/envConfig";
-
 const rateLimiter = rateLimit({
   legacyHeaders: true,
   limit: env.COMMON_RATE_LIMIT_MAX_REQUESTS,

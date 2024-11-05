@@ -46,6 +46,7 @@ async function createIndexIfNotExists(indexName: "domains" | "jobs") {
                 instagram: { type: "keyword" },
                 linkedin: { type: "keyword" },
                 phone_numbers: { type: "keyword" },
+                phone_numbers_by_nlp: { type: "keyword" },
 
                 /* WEBSITE DATA */
                 website_title: { type: "text" },

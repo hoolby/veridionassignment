@@ -8,12 +8,27 @@ import { NextFunction, Request, Response } from "express";
 
 const scrapeQueue = new Bull(
   "scraping",
-  `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`
+  `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`,
+  {
+    defaultJobOptions: {
+      removeOnComplete: true,
+      removeOnFail: false,
+      attempts: 2,
+    },
+  }
 );
 
-const CONCURRENCY = 3;
-
+const CONCURRENCY = 2;
 let activeScrapyProcesses = 0;
+
+/* scrapeQueue
+  .getJobs(["completed", "waiting", "active", "delayed", "failed", "paused"])
+  .then((jobs) => {
+    console.log("JOBS", jobs.length);
+    jobs.forEach((job) => {
+      console.log("JJJJJJJJJ", JSON.stringify(job));
+    });
+  }); */
 
 scrapeQueue.process(CONCURRENCY, async (job, done) => {
   activeScrapyProcesses++;
@@ -28,6 +43,7 @@ scrapeQueue.process(CONCURRENCY, async (job, done) => {
       "runspider",
       "scripts/scrape.py",
       "-a",
+      `total_domains=${totalDomains}`,
       `domains=${domains}`,
       "-a",
       `job_id=${jobId}`,
@@ -39,59 +55,47 @@ scrapeQueue.process(CONCURRENCY, async (job, done) => {
   const handleDomainSpiderLog = async (data: string, err = false) => {
     if (data.startsWith("[domain_spider]: ")) {
       const logData = data.split("[domain_spider]: ")[1];
+
+      // Parse JSON log data
       try {
         const jsonData = JSON.parse(logData);
-        console.log(`JSON LOG: `, JSON.parse(jsonData));
+        // console.log(`JSON LOG: `, jsonData);
+
+        if (jsonData?.status === "SUCCESS") {
+          /* const jobData = await getJobById(jobId);
+
+          // Update job progress
+          jobData.successfulDomains++;
+          jobData.progress = Math.round(
+            ((jobData.successfulDomains + jobData.erroredDomains) /
+              totalDomains) *
+              100
+          );
+          // Update job in ES
+          await createOrUpdateJob(jobId, jobData); */
+        } else if (jsonData?.status === "ERROR") {
+          /* const jobData = await getJobById(jobId);
+          jobData.erroredDomains++;
+          jobData.progress = Math.round(
+            ((jobData.successfulDomains + jobData.erroredDomains) /
+              totalDomains) *
+              100
+          );
+          await createOrUpdateJob(jobId, jobData); */
+        } else if (jsonData?.status === "COMPLETE") {
+          const jobData = await getJobById(jobId);
+          jobData.status = "completed";
+          await createOrUpdateJob(jobId, jobData);
+          done();
+        }
       } catch {
         console.log(`CUSTOM LOG: `, logData);
       }
-      return;
-      if (data.includes("PROGRESS: ")) {
-        const resultData = JSON.parse(data.split("PROGRESS: ")[1]);
-        const jobData = await getJobById(jobId);
-
-        // Update job progress
-        jobData.successfulDomains++;
-        jobData.progress = Math.round(
-          ((jobData.successfulDomains + jobData.erroredDomains) /
-            totalDomains) *
-            100
-        );
-
-        await createOrUpdateJob(jobId, jobData);
-
-        // Update each domain in Elasticsearch
-        try {
-          await ESClient.update({
-            index: "domains",
-            id: resultData.url,
-            body: { doc: resultData, doc_as_upsert: true },
-          });
-        } catch (error: any) {
-          console.error(
-            `Failed to update Elasticsearch for ${resultData.url}: ${error.message}`
-          );
-        }
-      } else if (data.includes("SCRAPE SUCCESS:")) {
-        const jobData = await getJobById(jobId);
-        jobData.status = "completed";
-        await createOrUpdateJob(jobId, jobData);
-        done();
-      } else if (data.includes("Error for")) {
-        const jobData = await getJobById(jobId);
-        jobData.erroredDomains++;
-        jobData.progress = Math.round(
-          ((jobData.successfulDomains + jobData.erroredDomains) /
-            totalDomains) *
-            100
-        );
-        await createOrUpdateJob(jobId, jobData);
-      }
-    } else if (data.startsWith("[scrapy.")) {
-      // console.log(`SCRAPY LOG: ${data}`);
-    } else {
-      // console.log(`UNACCOUNTED${err ? " ERROR " : " "}LOG: ${data}`);
-    }
+    } /* else if (data.startsWith("[scrapy.")) {
+        console.log(`SCRAPY LOG: ${data}`);
+      } else {
+        console.log(`UNACCOUNTED${err ? " ERROR " : " "}LOG: ${data}`);
+      } */
   };
 
   // Handle Scrapy output logs

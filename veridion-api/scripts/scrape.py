@@ -25,28 +25,40 @@ class ContactSpider(CrawlSpider):
     name = 'domain_spider'
     custom_settings = {
         'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'DOWNLOAD_TIMEOUT': 15,
-        'CONCURRENT_REQUESTS': 10,
+        'DOWNLOAD_TIMEOUT': 120,
+        'CONCURRENT_REQUESTS': 16,
         'DOWNLOAD_DELAY': 0.5,
         'RETRY_TIMES': 0,
-        'DEPTH_LIMIT': 2,
+        'DEPTH_LIMIT': 0,
         'LOG_FORMAT': '[%(name)s]: %(message)s',
-        'LOG_ENCODING': 'utf-8'
+        'LOG_ENCODING': 'utf-8',
+        'REDIRECT_ENABLED': True
     }
 
-    def __init__(self, domains=None, job_id=None, *args, **kwargs):
+    def __init__(self, domains=None, job_id=None, total_domains=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Job params
         self.job_id = job_id
         self.domains = domains.split(',') if domains else []
-        self.total_domains = len(self.domains)
+        self.process_total_domains = len(self.domains)
+        self.total_domains = total_domains
+        self.successful_domains = 0
+        self.errored_domains = 0
+        
+        # NLP
+        self.nlp = spacy.load("en_core_web_md")
+        
+        # PHONE MATCHER
+        self.matcher = Matcher(self.nlp.vocab)
+        phone_pattern = [{"ORTH": "+"}, {"ORTH": "49"}, {"ORTH": "(", "OP": "?"}, {"SHAPE": "dddd"}, {"ORTH": ")", "OP": "?"}, {"SHAPE": "dddd", "LENGTH": 6}]
+        self.matcher.add("PHONE_NUMBER", [phone_pattern])
         
         # Script variables
         self.output_folder = "output"
         self.phone_regex = re.compile(r'\(?\b\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b')
         self.working_domains = set()
         start= {
-            'total_domains': self.total_domains
+            'process_total_domains': self.process_total_domains
         }
         self.logger.info(json.dumps(start))
 
@@ -55,48 +67,40 @@ class ContactSpider(CrawlSpider):
             # Define URL variants for each domain
             url_variants = [
                 f"https://{domain}",
-                f"https://www.{domain}"
+                f"https://www.{domain}",
                 f"http://{domain}",
-                f"http://www.{domain}",
+                f"http://www.{domain}"
             ]
             # Pass URL variants to parse method
-            yield scrapy.Request(url=url_variants[0], meta={'variants': url_variants, 'index': 0, 'domain': domain}, callback=self.parse_variant, errback=self.errback_variant)
-            
-    def parse_item(self, response):
-        domain = response.meta['domain']
-        
-        if domain not in self.working_domains:
-            self.working_domains.add(domain)
-            domain_folder = os.path.join(self.output_folder, domain)
-            os.makedirs(domain_folder, exist_ok=True)
-
-        soup = BeautifulSoup(response.body, 'lxml')
-        for script in soup(["script", "style"]):
-            script.extract()
-
-        text_content = re.sub(r'\s+', ' ', soup.get_text()).strip()
-        path = urlparse(response.url).path.strip("/").replace("/", "_")
-        filename = os.path.join(self.output_folder, domain, f"{path if path else 'index'}.txt")
-        
-        with open(filename, "w", encoding='utf-8') as f:
-            f.write(text_content)
-            link_extractor = LinkExtractor(
-                allow_domains=[domain],
-                deny_extensions=['pdf', 'doc', 'jpg', 'png', 'gif', 'zip'],
-                deny=['mailto:', 'javascript:', 'tel:', 'fax:', 'sms:', 'callto:', 'skype:', 'whatsapp:', r'#.*']
-            )
-            links = link_extractor.extract_links(response)
-
-        for link in links:
             yield scrapy.Request(
-                    link.url,
-                    callback=self.parse_item, 
-                    errback=self.errback, 
-                    dont_filter=True,
-                    meta={'domain': domain}
-                )
+                url=url_variants[0],
+                meta={
+                    'variants': url_variants,
+                    'index': 0,
+                    'domain': domain,
+                    'dont_redirect': True,
+                    'handle_httpstatus_list': [301,302]
+                    },
+                callback=self.parse_variant,
+                errback=self.errback_variant,
+                headers={('User-Agent', 'Mozilla/5.0')})
 
     def parse_variant(self, response):
+        # Handle redirects
+        self.logger.info(f"Processing {response.status} response from {response.url}")
+        if response.status in [301, 302]:
+            redirected_url = response.headers.get('Location').decode('utf-8')
+            self.logger.info(f"Redirected to {redirected_url}")
+            yield scrapy.Request(
+                redirected_url,
+                callback=self.parse_variant,
+                errback=self.errback_variant,
+                dont_filter=True,
+                meta=response.meta,  # Preserve meta information
+                headers={('User-Agent', 'Mozilla/5.0')}
+            )
+            return
+        
         # Indicate that we found a working URL by marking a flag
         response.meta['found_working'] = True
         
@@ -114,8 +118,10 @@ class ContactSpider(CrawlSpider):
         # Clean multiple spaces
         text_content = re.sub(r'\s+', ' ', soup.get_text()).strip()
         
-        #################################################
-        # Process response
+        # Load nlp on text
+        doc = self.nlp(text_content)
+        
+        # Scrape data
         phone_numbers = list(set(self.phone_regex.findall(text_content)))
         social_media_links = self.extract_social_media_links(soup)
         
@@ -123,15 +129,21 @@ class ContactSpider(CrawlSpider):
         data = {
             'domain': domain,
             'valid_url': valid_url,
+            'facebook': social_media_links.get('facebook', None),
+            'instagram': social_media_links.get('instagram', None),
+            'linkedin': social_media_links.get('linkedin', None),
             'last_crawled_date': datetime.now().isoformat(),
-            'social_media_links':social_media_links if social_media_links else None,
-            'phone_numbers':phone_numbers if phone_numbers else None
-            # 'text_content': text_content  # Replace with actual data extraction logic
+            'phone_numbers': phone_numbers if phone_numbers else None,
+            'status': 'SUCCESS',
+            'text_content': text_content  # Replace with actual data extraction logic
         }
         self.logger.info(json.dumps(data))
         
         # Update Elasticsearch with the result
         self.update_elasticsearch(domain, data)
+        
+        # Update job progress
+        self.successful_domains += 1
 
     def errback_variant(self, failure):
         # Retrieve metadata
@@ -153,10 +165,13 @@ class ContactSpider(CrawlSpider):
                     'variants': variants,
                     'index': index + 1,
                     'domain': domain,
-                    'found_working': failure.request.meta.get('found_working', False)
+                    'found_working': failure.request.meta.get('found_working', False),
+                    'dont_redirect': True,
+                    'handle_httpstatus_list': [301,302]
                 },
                 callback=self.parse_variant,
-                errback=self.errback_variant
+                errback=self.errback_variant,
+                headers={('User-Agent', 'Mozilla/5.0')}
             )
         else:
             # Log error JSON object if no variant is found
@@ -164,6 +179,7 @@ class ContactSpider(CrawlSpider):
                 'domain': domain,
                 'valid_url': None,
                 'message': 'No working variant found',
+                'status': 'ERROR',
                 'error': str(failure.value),
                 'last_crawled_date': datetime.now().isoformat()
             }
@@ -171,6 +187,9 @@ class ContactSpider(CrawlSpider):
             
             # Update Elasticsearch with the error
             self.update_elasticsearch(domain, error_data)
+            
+            # Update job progress
+            self.errored_domains += 1
 
     def update_elasticsearch(self, domain, result):
         url = "http://localhost:9200/domains/_update_by_query"
@@ -192,7 +211,28 @@ class ContactSpider(CrawlSpider):
             self.logger.info(f"Successfully updated domain {domain} in Elasticsearch.")
         else:
             self.logger.error(f"Failed to update domain {domain} in Elasticsearch: {response.text}")
-    
+
+    def update_job_progress(self):
+        progress = round(
+            ((self.successful_domains + self.errored_domains) / self.total_domains) * 100
+        )
+        job_data = {
+            'successfulDomains': self.successful_domains,
+            'erroredDomains': self.errored_domains,
+            'progress': progress
+        }
+        url = f"http://localhost:9200/jobs/_update/{self.job_id}"
+        auth = ('elastic', 'changeme')
+        headers = {'Content-Type': 'application/json'}
+        data = {
+            "doc": job_data
+        }
+        response = requests.post(url, auth=auth, headers=headers, json=data)
+        if response.status_code == 200:
+            self.logger.info(f"Successfully updated job {self.job_id} progress in Elasticsearch.")
+        else:
+            self.logger.error(f"Failed to update job {self.job_id} progress in Elasticsearch: {response.text}")
+
     def extract_social_media_links(self, soup):
         links = {}
         for a in soup.find_all('a', href=True):
@@ -208,4 +248,15 @@ class ContactSpider(CrawlSpider):
         return links
     
     def closed(self, reason):
-        logger.info(f"PROGRESS COMPLETE: Crawling completed with reason: {reason}.")
+        result = {
+            'job': self.job_id,
+            'status': 'COMPLETE',
+            'reason': reason,
+            'successfulDomains': self.successful_domains,
+            'erroredDomains': self.errored_domains,
+            'progress': round(
+                ((self.successful_domains + self.errored_domains) / self.total_domains) * 100
+            )
+        }
+        self.logger.info(json.dumps(result))
+        self.update_job_progress()
