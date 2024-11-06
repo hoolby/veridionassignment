@@ -1,15 +1,12 @@
 import fs from "fs";
 import csv from "csv-parser";
-
-export const parseCSV = (filePath: string): Promise<string[]> => {
+export const parseCSV = (filePath: string): Promise<Record<string, any>[]> => {
   return new Promise((resolve, reject) => {
-    const results: string[] = [];
+    const results: object[] = [];
     fs.createReadStream(filePath)
       .pipe(csv())
       .on("data", (data) => {
-        if (data.domain) {
-          results.push(data.domain);
-        }
+        results.push(data);
       })
       .on("end", () => {
         resolve(results);

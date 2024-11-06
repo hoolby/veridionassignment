@@ -26,3 +26,4 @@ Express Api template - https://github.com/edwinhern/express-typescript-2024
 18. On merge assume new data is correct
 19. https://www.soleadify.com/wp-content/uploads/2022/08/Soleadify-tech-map.png added file system because of this, save to storage then run the NLP on it
 20. don't worry about this
+21. normalize phone numbers

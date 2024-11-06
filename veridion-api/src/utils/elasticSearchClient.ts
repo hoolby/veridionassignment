@@ -32,6 +32,9 @@ async function createIndexIfNotExists(indexName: "domains" | "jobs") {
                 /* CRAWL DATA */
                 domain: { type: "keyword" },
                 valid_url: { type: "text" },
+                status: {
+                  type: "keyword",
+                },
 
                 /* COMPANY NAMES */
                 company_commercial_name: { type: "text" },
@@ -56,6 +59,12 @@ async function createIndexIfNotExists(indexName: "domains" | "jobs") {
                 last_crawled_date: {
                   type: "date",
                 },
+
+                /* METADATA */
+                last_job_id: {
+                  type: "keyword",
+                },
+
                 added_date: {
                   type: "date",
                 },
@@ -73,24 +82,12 @@ async function createIndexIfNotExists(indexName: "domains" | "jobs") {
                 status: {
                   type: "keyword",
                 },
-                result: {
-                  type: "nested",
-                },
-                progress: {
-                  type: "integer",
-                },
                 totalDomains: {
                   type: "integer",
                 },
-                queuedDomains: {
-                  type: "integer",
-                },
-                successfulDomains: {
-                  type: "integer",
-                },
-                erroredDomains: {
-                  type: "integer",
-                },
+                /* domainStatusCounts: {
+                  type: "nested",
+                }, */
               },
             },
           },
@@ -182,6 +179,7 @@ async function createOrUpdateJob(jobId: string, jobData: Record<string, any>) {
         doc: jobData,
         doc_as_upsert: true,
       },
+      retry_on_conflict: 3,
     });
     console.log(`Job ${jobId} created/updated successfully.`);
   } catch (error) {
@@ -232,13 +230,123 @@ async function updateDomainResult(domain: string, result: Record<string, any>) {
   }
 }
 
+async function getDomainStatusCounts(
+  jobId: string | null = null
+): Promise<{ success: number; error: number }> {
+  try {
+    const { aggregations, ...result } = await ESClient.search({
+      index: "domains",
+      body: {
+        query: jobId
+          ? {
+              term: { last_job_id: jobId },
+            }
+          : {
+              match_all: {},
+            },
+        aggs: {
+          status_counts: {
+            terms: {
+              field: "status",
+              size: 10, // Ensure it returns all possible status values
+            },
+          },
+        },
+        size: 0,
+      },
+    });
+    // @ts-expect-error aggregations is possibly undefined
+    const counts = aggregations?.status_counts?.buckets.reduce(
+      (
+        acc: { success: number; error: number },
+        bucket: { key: string; doc_count: number }
+      ) => {
+        if (bucket.key === "SUCCESS") {
+          acc.success = bucket.doc_count;
+        } else if (bucket.key === "ERROR") {
+          acc.error = bucket.doc_count;
+        }
+        return acc;
+      },
+      { success: 0, error: 0 }
+    );
+
+    return counts || { success: 0, error: 0 };
+  } catch (error) {
+    console.error(
+      `Error fetching domain status counts for job ${jobId}:`,
+      error
+    );
+    return { success: 0, error: 0 };
+  }
+}
+
+const countSuccess = async () => {
+  const response = await ESClient.count({
+    index: "domains",
+    body: {
+      query: {
+        match: {
+          status: "success", // assuming status is stored in this field
+        },
+      },
+    },
+  });
+  return response.count;
+};
+
+const calculateFillRate = async (field: string) => {
+  const totalCount = await ESClient.count({ index: "domains" });
+
+  const filledCountResponse = await ESClient.count({
+    index: "domains",
+    body: {
+      query: {
+        bool: {
+          must: [{ exists: { field } }],
+        },
+      },
+    },
+  });
+
+  return (filledCountResponse.count / totalCount.count) * 100;
+};
+
+const getFillRates = async () => {
+  const fields = [
+    "phone_numbers",
+    "facebook",
+    "instagram",
+    "linkedin",
+    "website_title",
+    "website_description",
+    "company_legal_name",
+    "company_all_available_names",
+    "company_commercial_name",
+    "phone_numbers_from_nlp",
+    "locations",
+  ];
+
+  const fillRates = await Promise.all(
+    fields.map(async (field) => ({
+      field,
+      fillRate: await calculateFillRate(field),
+    }))
+  );
+
+  return fillRates;
+};
+
 export {
+  getFillRates,
   createIndexIfNotExists,
   updateOrIndexDocument,
   bulkIndexDocuments,
   pingES,
   createOrUpdateJob,
   getJobById,
-  updateDomainResult, // Added export
+  calculateFillRate,
+  updateDomainResult,
+  getDomainStatusCounts, // Added export
 };
 export default ESClient;

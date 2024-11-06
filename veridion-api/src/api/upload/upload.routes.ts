@@ -23,7 +23,6 @@ function formatDomain(domain: string): string | null {
 }
 
 const router: Router = express.Router();
-
 router.post(
   "/csv",
   upload.single("file"),
@@ -34,13 +33,19 @@ router.post(
       }
       const filePath = req.file.path;
 
-      // Parse CSV file and get domains
-      const websites = await parseCSV(filePath);
-      const formattedDomains: string[] = websites
-        .map(formatDomain)
-        .filter((domain): domain is string => domain !== null); // Filter out nulls
+      // Parse CSV file and get data
+      const records = await parseCSV(filePath);
+      const formattedRecords = records
+        .map((record) => {
+          const formattedDomain = formatDomain(record?.domain);
+          if (formattedDomain) {
+            return { ...record, domain: formattedDomain };
+          }
+          return null;
+        })
+        .filter((record): record is { domain: string } => record !== null); // Filter out nulls
 
-      if (formattedDomains.length === 0) {
+      if (formattedRecords.length === 0) {
         fs.unlinkSync(filePath); // Delete the file
         return res
           .status(400)
@@ -49,20 +54,20 @@ router.post(
 
       const added_date = new Date().toISOString(); // ISO 8601 formatted date
 
-      // For each domain, check if it exists, if so update it, otherwise create a new entry
+      // For each record, check if it exists, if so update it, otherwise create a new entry
       let totalIndexed = 0;
       let totalUpdated = 0;
       let totalErrored = 0;
 
       await Promise.all(
-        formattedDomains.map(async (domain: string) => {
+        formattedRecords.map(async (record) => {
           const document = {
-            domain,
+            ...record,
             added_date,
           };
           const result = await updateOrIndexDocument(
             "domains",
-            domain,
+            record.domain,
             document
           );
           switch (result) {

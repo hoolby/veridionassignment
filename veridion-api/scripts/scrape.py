@@ -50,7 +50,7 @@ class ContactSpider(CrawlSpider):
         
         # PHONE MATCHER
         self.matcher = Matcher(self.nlp.vocab)
-        phone_pattern = [{"ORTH": "+"}, {"ORTH": "49"}, {"ORTH": "(", "OP": "?"}, {"SHAPE": "dddd"}, {"ORTH": ")", "OP": "?"}, {"SHAPE": "dddd", "LENGTH": 6}]
+        phone_pattern = [{"ORTH": "("}, {"SHAPE": "ddd"}, {"ORTH": ")"}, {"SHAPE": "ddd"},{"ORTH": "-", "OP": "?"}, {"SHAPE": "ddd"}]
         self.matcher.add("PHONE_NUMBER", [phone_pattern])
         
         # Script variables
@@ -86,6 +86,25 @@ class ContactSpider(CrawlSpider):
                 headers={('User-Agent', 'Mozilla/5.0')})
 
     def parse_variant(self, response):
+        """
+        Parses the variant of the given response, handling redirects and extracting relevant data.
+        Args:
+            response (scrapy.http.Response): The response object to parse.
+        Yields:
+            scrapy.Request: A new request if the response is a redirect.
+        Extracts:
+            - Website title
+            - Website description
+            - Company names
+            - Locations
+            - Phone numbers
+            - Social media links
+        Updates:
+            - Elasticsearch with the extracted data.
+            - Job progress by incrementing the count of successful domains.
+        Logs:
+            - Information about the processing status and extracted data.
+        """
         # Handle redirects
         self.logger.info(f"Processing {response.status} response from {response.url}")
         if response.status in [301, 302]:
@@ -121,23 +140,88 @@ class ContactSpider(CrawlSpider):
         # Load nlp on text
         doc = self.nlp(text_content)
         
-        # Scrape data
-        phone_numbers = list(set(self.phone_regex.findall(text_content)))
-        social_media_links = self.extract_social_media_links(soup)
+        ################## SCRAPE DATA ##################
+        try:
+            # Website metadata
+            website_title = soup.title.string if soup.title else None
+            website_description = soup.find("meta", property="og:description")['content'] if soup.find("meta", property="og:description") else None
+        except Exception as e:
+            self.logger.error(f"Error extracting website metadata: {e}")
+            website_title = None
+            website_description = None
+
+        try:
+            # NER to extract company names
+            company_all_available_names = list(set(ent.text for ent in doc.ents if ent.label_ == "ORG"))
+        except Exception as e:
+            self.logger.error(f"Error extracting company names: {e}")
+            company_all_available_names = []
+
+        try:
+            # NER to extract company name from website title, website description, or company_all_available_names
+            company_commercial_name = next((ent.text for ent in self.nlp(str(website_title)).ents if ent.label_ == "ORG"), None)
+            if not company_commercial_name and website_description:
+                company_commercial_name = next((ent.text for ent in self.nlp(str(website_description)).ents if ent.label_ == "ORG"), None)
+            if not company_commercial_name and company_all_available_names:
+                company_commercial_name = company_all_available_names[0]
+        except Exception as e:
+            self.logger.error(f"Error extracting company commercial name: {e}")
+            company_commercial_name = None
+
+        try:
+            # NER to extract locations
+            locations = list(set(ent.text for ent in doc.ents if ent.label_ == "GPE"))
+        except Exception as e:
+            self.logger.error(f"Error extracting locations: {e}")
+            locations = []
+
+        try:
+            # Extract phone numbers
+            phone_numbers = list(set(self.phone_regex.findall(text_content)))
+            # Normalize phone numbers to contain only digits and plus sign
+            phone_numbers = [re.sub(r'[^\d+]', '', phone) for phone in phone_numbers]
+        except Exception as e:
+            self.logger.error(f"Error extracting phone numbers: {e}")
+            phone_numbers = []
+
+        try:
+            # Extract phone numbers using spacy matcher
+            matches = self.matcher(doc)
+            self.logger.info(f"MMMMMMMMMMMMMMMMM: {matches}")
+            phone_numbers_from_nlp = list(set([doc[start:end].text for _, start, end in matches]))
+            # Normalize phone numbers to contain only digits and plus sign
+            phone_numbers_from_nlp = [re.sub(r'[^\d+]', '', phone) for phone in phone_numbers_from_nlp]
+        except Exception as e:
+            self.logger.error(f"Error extracting phone numbers using NLP: {e}")
+            phone_numbers_from_nlp = []
+
+        try:
+            # Extract social media links
+            social_media_links = self.extract_social_media_links(soup)
+        except Exception as e:
+            self.logger.error(f"Error extracting social media links: {e}")
+            social_media_links = {}
         
         # Extract data and return JSON object
         data = {
             'domain': domain,
             'valid_url': valid_url,
+            'website_title': website_title,
+            'website_description': website_description,
+            'company_all_available_names': company_all_available_names,
+            'company_commercial_name': company_commercial_name,
+            'phone_numbers': phone_numbers if phone_numbers else None,
+            'phone_numbers_from_nlp': phone_numbers_from_nlp if phone_numbers_from_nlp else None,
+            'locations': locations,
             'facebook': social_media_links.get('facebook', None),
             'instagram': social_media_links.get('instagram', None),
             'linkedin': social_media_links.get('linkedin', None),
+            'last_job_id': self.job_id,
             'last_crawled_date': datetime.now().isoformat(),
-            'phone_numbers': phone_numbers if phone_numbers else None,
             'status': 'SUCCESS',
             'text_content': text_content  # Replace with actual data extraction logic
         }
-        self.logger.info(json.dumps(data))
+        # self.logger.info(json.dumps(data))
         
         # Update Elasticsearch with the result
         self.update_elasticsearch(domain, data)
@@ -181,6 +265,7 @@ class ContactSpider(CrawlSpider):
                 'message': 'No working variant found',
                 'status': 'ERROR',
                 'error': str(failure.value),
+                'last_job_id': self.job_id,
                 'last_crawled_date': datetime.now().isoformat()
             }
             self.logger.error(json.dumps(error_data))
@@ -212,7 +297,7 @@ class ContactSpider(CrawlSpider):
         else:
             self.logger.error(f"Failed to update domain {domain} in Elasticsearch: {response.text}")
 
-    def update_job_progress(self):
+    def finish_job(self):
         progress = round(
             ((self.successful_domains + self.errored_domains) / self.total_domains) * 100
         )
@@ -259,4 +344,4 @@ class ContactSpider(CrawlSpider):
             )
         }
         self.logger.info(json.dumps(result))
-        self.update_job_progress()
+        self.finish_job()

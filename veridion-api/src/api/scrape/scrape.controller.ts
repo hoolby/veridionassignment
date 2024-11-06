@@ -1,5 +1,7 @@
 import ESClient, {
   createOrUpdateJob,
+  getDomainStatusCounts,
+  getFillRates,
   getJobById,
 } from "@/utils/elasticSearchClient";
 import Bull from "bull";
@@ -18,7 +20,7 @@ const scrapeQueue = new Bull(
   }
 );
 
-const CONCURRENCY = 2;
+const CONCURRENCY = 10;
 let activeScrapyProcesses = 0;
 
 /* scrapeQueue
@@ -44,6 +46,7 @@ scrapeQueue.process(CONCURRENCY, async (job, done) => {
       "scripts/scrape.py",
       "-a",
       `total_domains=${totalDomains}`,
+      "-a",
       `domains=${domains}`,
       "-a",
       `job_id=${jobId}`,
@@ -83,19 +86,19 @@ scrapeQueue.process(CONCURRENCY, async (job, done) => {
           );
           await createOrUpdateJob(jobId, jobData); */
         } else if (jsonData?.status === "COMPLETE") {
-          const jobData = await getJobById(jobId);
+          /* const jobData = await getJobById(jobId);
           jobData.status = "completed";
-          await createOrUpdateJob(jobId, jobData);
+          await createOrUpdateJob(jobId, jobData); */
           done();
         }
       } catch {
         console.log(`CUSTOM LOG: `, logData);
       }
-    } /* else if (data.startsWith("[scrapy.")) {
-        console.log(`SCRAPY LOG: ${data}`);
-      } else {
-        console.log(`UNACCOUNTED${err ? " ERROR " : " "}LOG: ${data}`);
-      } */
+    } else if (data.startsWith("[scrapy.")) {
+      // console.log(`SCRAPY LOG: ${data}`);
+    } else {
+      // console.log(`UNACCOUNTED${err ? " ERROR " : " "}LOG: ${data}`);
+    }
   };
 
   // Handle Scrapy output logs
@@ -116,9 +119,9 @@ scrapeQueue.process(CONCURRENCY, async (job, done) => {
       `Scrapy process completed. Active processes: ${activeScrapyProcesses}`
     );
 
-    const jobData = await getJobById(jobId);
+    /* const jobData = await getJobById(jobId);
     jobData.status = code === 0 ? "completed" : "failed";
-    await createOrUpdateJob(jobId, jobData);
+    await createOrUpdateJob(jobId, jobData); */
 
     if (code !== 0) {
       done(new Error(`Job ${jobId} failed with code ${code}`));
@@ -138,11 +141,6 @@ export const startScraping = async (
     const timestamp = `${Date.now()}`;
     const jobData = {
       status: "pending",
-      result: [],
-      progress: 0,
-      successfulDomains: 0,
-      erroredDomains: 0,
-      queuedDomains: 0,
     };
     await createOrUpdateJob(timestamp, jobData);
 
@@ -176,9 +174,7 @@ export const startScraping = async (
 
       // Update queued domains and job progress
       await createOrUpdateJob(timestamp, {
-        queuedDomains: totalProcessed,
         totalDomains,
-        progress: Math.round((totalProcessed / totalDomains) * 100),
       });
 
       const nextScroll = await ESClient.scroll({
@@ -190,7 +186,7 @@ export const startScraping = async (
       hits.hits = nextScroll.hits.hits;
     }
 
-    res.status(200).json({ jobId: timestamp });
+    res.status(200).json({ jobId: timestamp, totalDomains });
   } catch (error) {
     console.error(`Error starting scraping: ${error}`);
     res.status(500).json({ message: "Internal server error." });
@@ -211,7 +207,25 @@ export const getScrapingStatus = async (
       res.status(404).json({ message: "Job not found." });
       return;
     }
-    res.status(200).json(status);
+
+    const domainStatusCounts = await getDomainStatusCounts(jobId);
+    res.status(200).json({ ...status, domainStatusCounts });
+  } catch (error) {
+    console.error(`Error fetching scraping status: ${error}`);
+    res.status(500).json({ message: "Internal server error." });
+  }
+};
+
+// Endpoint to get scraping job status
+export const analyzeDomains = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const fillRates = await getFillRates();
+    const domainStatusCounts = await getDomainStatusCounts(null);
+    res.status(200).json({ fillRates, domainStatusCounts });
   } catch (error) {
     console.error(`Error fetching scraping status: ${error}`);
     res.status(500).json({ message: "Internal server error." });
