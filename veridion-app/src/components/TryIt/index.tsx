@@ -22,27 +22,32 @@ export const TryIt = () => {
             These features only work when running locally because I'm too lazy
             to deploy the backend.
             <span className="">But you can see it working here:</span>
-            <Button
-              onClick={() =>
-                window.open(
-                  "https://drive.google.com/file/d/1d3R2K5u3kBI4DrfH4_w0hz2C4N566Yam/preview",
-                  "_blank"
-                )
-              }
-              className="underline mt-4 font-bold gap-2"
-            >
-              <Link size={20} />
-              Google Drive
-            </Button>
-            <span className="">OR</span>
-            <iframe
-              src="https://drive.google.com/file/d/1d3R2K5u3kBI4DrfH4_w0hz2C4N566Yam/preview"
-              width="100%"
-              height="720"
-              allow="autoplay"
-              className="mt-4"
-              style={{ maxWidth: "100%", maxHeight: "100%" }}
-            ></iframe>
+            <div className="flex w-full place-content-center place-items-center justify-between flex-col">
+              <div className="flex w-full place-content-center p-2 h-full">
+                <Button
+                  onClick={() =>
+                    window.open(
+                      "https://drive.google.com/file/d/1d3R2K5u3kBI4DrfH4_w0hz2C4N566Yam/preview",
+                      "_blank"
+                    )
+                  }
+                  className="underline font-bold gap-2"
+                >
+                  <Link size={20} />
+                  See it on Google Drive
+                </Button>
+              </div>
+              <span className="p-4">OR</span>
+              <div className="aspect-video min-h-80 p-2 place-content-center w-full">
+                <iframe
+                  src="https://drive.google.com/file/d/1d3R2K5u3kBI4DrfH4_w0hz2C4N566Yam/preview"
+                  width="100%"
+                  height="100%"
+                  allow="autoplay"
+                  style={{ maxWidth: "100%", maxHeight: "100%" }}
+                ></iframe>
+              </div>
+            </div>
           </CardContent>
         </Card>
       </h2>

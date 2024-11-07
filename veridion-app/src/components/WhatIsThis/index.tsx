@@ -22,8 +22,7 @@ export const WhatIsThis = () => {
             about.
           </p>
           <p className="text-xl text-muted-foreground mt-4">
-            So, here it is, working on my computer, good luck trying to set it
-            up.
+            So, here what i've built.
           </p>
         </div>
         <div className="px-6 flex flex-col md:flex-row gap-8 md:gap-12">

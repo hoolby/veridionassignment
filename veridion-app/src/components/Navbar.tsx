@@ -28,12 +28,12 @@ const routeList: RouteProps[] = [
     label: "What it Is",
   },
   {
-    href: "#WhatCanItDo",
-    label: "What It Do",
-  },
-  {
     href: "#techstack",
     label: "Tech Stack",
+  },
+  {
+    href: "#WhatItDo",
+    label: "What It Do",
   },
   {
     href: "#faq",

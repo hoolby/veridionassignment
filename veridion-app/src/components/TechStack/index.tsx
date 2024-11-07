@@ -7,7 +7,7 @@ interface SponsorProps {
   image: string;
 }
 
-const sponsors: SponsorProps[] = [
+const techs: SponsorProps[] = [
   {
     name: "Node.js",
     description: "It's easy",
@@ -79,9 +79,9 @@ export const TechStack = () => {
         </p>
       </h2>
 
-      <div className="flex flex-wrap justify-center items-center gap-4 md:gap-8">
-        {sponsors.map(({ name, description, image }: SponsorProps) => (
-          <Card className="h-fit drop-shadow-xl shadow-black/10 dark:shadow-white/10">
+      <div className="flex flex-wrap justify-center items-center gap-4 md:gap-8 w-full">
+        {techs.map(({ name, description, image }: SponsorProps) => (
+          <Card className="h-fit drop-shadow-xl shadow-black/10 dark:shadow-white/10 xs:w-full w-full md:w-fit">
             <CardHeader className="space-y-1 flex md:flex-row justify-start items-start gap-4">
               <Avatar className="rounded-none bg-transparent">
                 <AvatarImage

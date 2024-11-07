@@ -39,9 +39,9 @@ const features: FeatureProps[] = [
   },
 ];
 
-export const WhatCanItDo = () => {
+export const WhatItDo = () => {
   return (
-    <section id="WhatCanItDo" className="container text-center py-24 sm:py-32">
+    <section id="WhatItDo" className="container text-center py-24 sm:py-32">
       <h2 className="text-3xl md:text-4xl font-bold">
         <span className="bg-gradient-to-b from-primary/60 to-primary text-transparent bg-clip-text">
           What{" "}

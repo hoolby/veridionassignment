@@ -5,7 +5,7 @@ import { ProblemsAndSolutions } from "./components/ProblemsAndSolutions";
 import { ScrollToTop } from "./components/ScrollToTop";
 import { TechStack } from "./components/TechStack";
 import { TryIt } from "./components/TryIt";
-import { WhatCanItDo } from "./components/WhatCanItDo";
+import { WhatItDo } from "./components/WhatItDo";
 import { WhatIsThis } from "./components/WhatIsThis";
 
 function App() {
@@ -15,7 +15,7 @@ function App() {
       <Hero />
       <WhatIsThis />
       <TechStack />
-      <WhatCanItDo />
+      <WhatItDo />
       <ProblemsAndSolutions />
       <TryIt />
       <ScrollToTop />
